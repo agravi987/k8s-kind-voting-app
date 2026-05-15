@@ -18,6 +18,7 @@ By the end of this setup, you will have:
 - A voting app deployed from GitHub
 - Vote and result web pages accessible from your browser
 - Optional Kubernetes Dashboard access
+- Optional Prometheus and Grafana monitoring
 
 ## Prerequisites ✅
 
@@ -60,6 +61,9 @@ Common ports used in this guide:
 | `5000` | Voting app UI |
 | `5001` | Result app UI |
 | `8080` | Kubernetes Dashboard, optional |
+| `3000` | Grafana UI, optional monitoring |
+| `9090` | Prometheus UI, optional monitoring |
+| `9093` | Alertmanager UI, optional monitoring |
 
 ## Step 1: Create an EC2 Instance ☁️
 
@@ -347,7 +351,9 @@ helm version
 Install Kubernetes Dashboard using Helm:
 
 ```bash
-helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+helm repo remove kubernetes-dashboard 2>/dev/null || true
+helm repo add kubernetes-dashboard https://kubernetes-retired.github.io/dashboard/
+helm repo update
 helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard --create-namespace --namespace kubernetes-dashboard
 ```
 
@@ -408,6 +414,133 @@ Paste the generated token on the Dashboard login page.
 
 > The `admin-user` account has full cluster-admin access. Use it only for practice.
 
+## Optional: Install Prometheus and Grafana
+
+Prometheus collects metrics from the cluster, and Grafana gives you dashboards to view those metrics. The easiest learning setup is the `kube-prometheus-stack` Helm chart, which installs Prometheus Operator, Prometheus, Alertmanager, Grafana, node-exporter, kube-state-metrics, default alerts, and Kubernetes dashboards.
+
+> This stack uses more CPU and memory than the voting app. A `t2.medium` can work for practice, but if pods stay pending or restart often, use a larger EC2 instance such as `t3.medium` or higher.
+
+Add the Prometheus Community Helm repository:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+```
+
+Install the monitoring stack into a namespace called `monitoring`:
+
+```bash
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace
+```
+
+Check the monitoring pods and services:
+
+```bash
+kubectl get pods -n monitoring
+kubectl get svc -n monitoring
+```
+
+Wait until the main pods are `Running`. You should see Grafana, Prometheus, Alertmanager, kube-state-metrics, node-exporter, and Prometheus Operator resources.
+
+### Access Grafana
+
+Get the Grafana admin password:
+
+```bash
+kubectl get secret -n monitoring kube-prometheus-stack-grafana \
+  -o jsonpath="{.data.admin-password}" | base64 -d && echo
+```
+
+Forward Grafana to port `3000`:
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80 --address=0.0.0.0 &
+```
+
+Open Grafana in your browser:
+
+```text
+http://<EC2_PUBLIC_IP>:3000
+```
+
+Login details:
+
+| Field | Value |
+| --- | --- |
+| Username | `admin` |
+| Password | Use the password from the secret command |
+
+After login, go to **Dashboards** and browse the prebuilt Kubernetes dashboards. Useful dashboards include node, namespace, pod, workload, and API server views.
+
+### Access Prometheus
+
+Forward Prometheus to port `9090`:
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 --address=0.0.0.0 &
+```
+
+Open Prometheus in your browser:
+
+```text
+http://<EC2_PUBLIC_IP>:9090
+```
+
+Useful places to check:
+
+- **Status > Targets** shows what Prometheus is scraping.
+- **Graph** lets you run PromQL queries.
+
+Example PromQL queries:
+
+```text
+up
+kube_pod_info
+container_cpu_usage_seconds_total
+```
+
+### Access Alertmanager
+
+Alertmanager is optional for this project, but you can open it if you want to view alert status.
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093 --address=0.0.0.0 &
+```
+
+Open:
+
+```text
+http://<EC2_PUBLIC_IP>:9093
+```
+
+### Monitor the Voting App
+
+After the voting app is deployed, check that Prometheus can see Kubernetes objects from the `default` namespace:
+
+```bash
+kubectl get pods -n default
+kubectl get svc -n default
+```
+
+In Grafana, open the Kubernetes dashboards and filter by namespace `default`. You can watch pod health, CPU usage, memory usage, restarts, and workload status for the voting app.
+
+### Remove Prometheus and Grafana
+
+If you want to remove the monitoring stack:
+
+```bash
+helm uninstall kube-prometheus-stack -n monitoring
+kubectl delete namespace monitoring
+```
+
+The chart installs monitoring CRDs. For a learning cluster, deleting the KIND cluster also removes everything:
+
+```bash
+kind delete cluster
+```
+
 ## Useful Troubleshooting Commands 🛠️
 
 Check all pods:
@@ -461,7 +594,11 @@ kind delete cluster
 | Voting app page does not open | Port `5000` is blocked | Allow port `5000` in the EC2 security group |
 | Result page does not open | Port `5001` is blocked | Allow port `5001` in the EC2 security group |
 | Argo CD app is not syncing | Wrong repo URL, branch, or manifest path | Recheck repository URL, revision, and path |
+| Dashboard Helm repo gives `404 Not Found` | Old Dashboard chart repo was moved after retirement | Use `https://kubernetes-retired.github.io/dashboard/` |
 | Dashboard token does not work | Dashboard needs HTTPS token login | Open the Dashboard URL with `https://` |
+| Grafana page does not open | Port forwarding or security group issue | Check port `3000` and keep the port-forward command running |
+| Prometheus page does not open | Port forwarding or security group issue | Check port `9090` and keep the port-forward command running |
+| Monitoring pods stay pending | EC2 instance does not have enough resources | Use a larger instance or delete unused workloads |
 
 ## Reference Links 🔗
 
@@ -470,6 +607,8 @@ kind delete cluster
 - Argo CD getting started: <https://argo-cd.readthedocs.io/en/stable/getting_started/>
 - Kubernetes Dashboard: <https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/>
 - Helm installation: <https://helm.sh/docs/intro/install/>
+- Prometheus Community Helm Charts: <https://github.com/prometheus-community/helm-charts>
+- kube-prometheus-stack chart: <https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack>
 
 ## Final Result 🎉
 
@@ -479,5 +618,6 @@ You now have a complete GitOps workflow:
 2. Argo CD watches the repository.
 3. Argo CD deploys the voting app into the KIND Kubernetes cluster.
 4. You access the vote and result services from your browser.
+5. Prometheus and Grafana can monitor the cluster and voting app.
 
-This is a strong beginner-friendly DevOps project because it covers EC2, Docker, Kubernetes, KIND, Argo CD, GitOps, services, deployments, and port forwarding in one practical setup.
+This is a strong beginner-friendly DevOps project because it covers EC2, Docker, Kubernetes, KIND, Argo CD, GitOps, services, deployments, monitoring, dashboards, and port forwarding in one practical setup.
